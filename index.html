@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>breakEftTlvData &middot; CEFT Tag 120 TLV Decoder</title>
+  <meta name="description" content="Decode CEFT EFT TLV (Field 120 / tag 120) strings and API request bodies into named fields and tag mappings." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔎</text></svg>" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🔎</span>
+      <div>
+        <h1>breakEftTlvData</h1>
+        <p class="tagline">CEFT EFT TLV decoder &mdash; Field 120 / tag 120 &amp; API request body mapping</p>
+      </div>
+    </div>
+    <a class="repo-link" href="https://github.com/directpaylk" target="_blank" rel="noopener">CEFT Suite</a>
+  </header>
+
+  <main class="container">
+    <section class="panel input-panel">
+      <div class="panel-head">
+        <h2>Input</h2>
+        <span id="detectBadge" class="badge badge-muted">awaiting input</span>
+      </div>
+
+      <textarea
+        id="input"
+        spellcheck="false"
+        placeholder="Paste a tag 120 / Field 120 TLV string&#10;e.g. 002012100641123718004016LKR1516300010104005004699...&#10;&#10;— or —&#10;&#10;Paste an API request body (JSON), e.g.&#10;{&#10;  &quot;destinationAccount&quot;: &quot;100641123718&quot;,&#10;  &quot;destinationBankCode&quot;: &quot;6990&quot;,&#10;  &quot;reference&quot;: &quot;invoice-2026&quot;&#10;}"></textarea>
+
+      <div class="actions">
+        <button id="decodeBtn" class="btn btn-primary">Decode</button>
+        <button id="sampleTlvBtn" class="btn">Load sample TLV</button>
+        <button id="sampleJsonBtn" class="btn">Load sample request body</button>
+        <button id="clearBtn" class="btn btn-ghost">Clear</button>
+      </div>
+      <p id="errorMsg" class="error-msg" hidden></p>
+    </section>
+
+    <section id="resultSection" class="panel result-panel" hidden>
+      <div class="panel-head">
+        <h2 id="resultTitle">Decoded</h2>
+        <div class="result-tools">
+          <span id="resultMeta" class="badge badge-muted"></span>
+          <button id="copyJsonBtn" class="btn btn-small">Copy as JSON</button>
+        </div>
+      </div>
+      <div id="resultBody"></div>
+    </section>
+
+    <section class="panel reference-panel">
+      <div class="panel-head">
+        <h2>Tag dictionary</h2>
+        <span class="badge badge-muted">source of truth: EftTlvTag &amp; EfvTlvBuilder</span>
+      </div>
+      <p class="hint">
+        Every sub-field of CEFT Field 120 is encoded as
+        <code>TAG&nbsp;(3 digits)</code> + <code>LENGTH&nbsp;(3 digits)</code> + <code>VALUE</code>,
+        concatenated and parsed recursively. The table below maps each tag to its
+        enum name, the <code>FinancialMessage</code> property it populates, and the API
+        request body field it usually comes from.
+      </p>
+      <div class="table-wrap">
+        <table id="dictTable" class="data-table">
+          <thead>
+            <tr>
+              <th>Tag</th>
+              <th>Field name (enum)</th>
+              <th>FinancialMessage property</th>
+              <th>API request field</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>
+      Client-side only &mdash; nothing you paste leaves your browser.
+      Decoding logic mirrors <code>MessageConversionHelper.breakEftTlvData()</code> in the CEFT core.
+    </p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
