@@ -1,426 +1,384 @@
-/*
- * breakEftTlvData — client-side CEFT EFT TLV decoder.
+/* ============================================================================
+ * breakEftTlvData — client-side CEFT Tag 120 / Field 120 TLV decoder.
  *
- * TLV wire format (CEFT Field 120 / "tag 120"):
- *   [ TAG (3 digits) ][ LENGTH (3 digits) ][ VALUE (LENGTH chars) ] ... repeated
+ * Scope (kept deliberately small):
+ *   - input: a raw Tag 120 / Field 120 TLV string ONLY
+ *   - decode each tag (TAG[3] + LENGTH[3] + VALUE[len], repeated)
+ *   - map every tag to its field name, meaning and FinancialMessage property
+ *   - identify the business flow (QR / CEFT / JustPay / ...) from the values
+ *   - explain how each parameter is used inside that flow
  *
- * The tag dictionary below is the source of truth taken directly from the
- * CEFT core:
- *   - enum / tagId        -> EftTlvTag.java
- *   - financialMessageProp -> EfvTlvBuilder.tagPropertyMap
- *   - apiField            -> FinancialRequest payload (best-effort 1:1 mapping)
- *   - parse target        -> MessageConversionHelper.breakEftTlvData()
- */
+ * Everything below is derived from the CEFT core:
+ *   EftTlvTag.java, EfvTlvBuilder.java, MessageConversionHelper.breakEftTlvData(),
+ *   TransactionCode.java, MerchantType.java, AcquirerTransactionServiceHelper.java
+ * ========================================================================== */
 
+/* ----------------------------- tag dictionary ----------------------------- */
 const TAGS = {
-  "001": {
-    enumName: "BENEFICIARY_CARD_NO",
-    prop: "beneficiaryCardNo",
-    apiField: null,
-    desc: "Beneficiary card number (card-based credit flows).",
+  "001": { name: "BENEFICIARY_CARD_NO", prop: "beneficiaryCardNo",
+    meaning: "Beneficiary card number used in card-based credit transactions." },
+  "002": { name: "DESTINATION_ACCOUNT_NO", prop: "destAccountNo",
+    meaning: "The destination (beneficiary / credited) account number." },
+  "003": { name: "CARDHOLDER_PAN", prop: "cardholderPAN",
+    meaning: "Cardholder Primary Account Number (PAN)." },
+  "004": { name: "CARDHOLDER_ACCOUNT", prop: "cardholderAccount",
+    meaning: "The originating (debited) account. Often currency-prefixed, e.g. LKR<account>." },
+  "005": { name: "DESTINATION_BANK_CODE", prop: "destBankCode",
+    meaning: "Bank code of the destination institution (also copied to receiverIdentificationCode)." },
+  "006": { name: "ORIGINATING_BANK_CODE", prop: "orgBankCode",
+    meaning: "Bank code of the originating (sending / acquiring) institution." },
+  "007": { name: "DESTINATION_BRANCH_CODE", prop: "destBranchCode",
+    meaning: "Branch code of the destination account (validated/transformed on parse)." },
+  "008": { name: "ORIGINATING_BRANCH_CODE", prop: "orgBranchCode",
+    meaning: "Branch code of the originating account (validated/transformed on parse)." },
+  "009": { name: "DESTINATION_ACCOUNT_HOLDERS_NAME", prop: "destAccountHolderName",
+    meaning: "Name of the destination account holder (the payee)." },
+  "010": { name: "ACCOUNT_HOLDERS_NAME", prop: "orgAccountHolderName",
+    meaning: "Name of the originating account holder (the payer)." },
+  "011": { name: "PARTICULARS", prop: "particulars",
+    meaning: "Narrative / particulars shown to the beneficiary." },
+  "012": { name: "REFERENCE", prop: "reference",
+    meaning: "Customer / transaction reference." },
+  "013": { name: "TRANSACTION_CODE", prop: "transactionCode.code",
+    meaning: "Transaction code — the primary signal for the business flow." },
+  "014": { name: "TRANSACTION_ID", prop: "transactionId",
+    meaning: "Transaction ID (defined in EftTlvTag; not currently built/parsed in core)." },
+  "015": { name: "ORIGINATOR_WALLET_NUMBER", prop: "originatorWalletNumber",
+    meaning: "Originator wallet number (defined in EftTlvTag; not currently built/parsed)." },
+  "016": { name: "DESTINATION_WALLET_NUMBER", prop: "destinationWalletNumber",
+    meaning: "Destination wallet number (defined in EftTlvTag; not currently built/parsed)." },
+  "017": { name: "ADDITIONAL_DATA", prop: "additionalData",
+    meaning: "Additional data (defined in EftTlvTag; not currently built/parsed)." },
+};
+
+/* ------------------------- transaction-code catalogue --------------------- */
+/* Tag 013 value -> { label, the flow it most strongly implies }. */
+const TXN_CODES = {
+  "00": "BALANCE_INQUIRY",
+  "11": "CALL_MONEY_TRANSACTIONS",
+  "12": "FOREIGN_EXCHANGE_SETTLEMENTS",
+  "21": "STANDING_ORDERS",
+  "22": "INSURANCE",
+  "23": "SALARIES",
+  "24": "PENSIONS",
+  "25": "EPF_REFUNDS",
+  "26": "ETF",
+  "31": "ELECTRICITY_BILLS",
+  "32": "TELEPHONE_BILLS",
+  "33": "WATER_BILLS",
+  "41": "CREDIT_CARDS",
+  "42": "JP_REGISTRATION",
+  "43": "JP_TRANSACTION",
+  "44": "CUSTOMER_TRANSFER_DR",
+  "45": "CUSTOMER_DR",
+  "52": "CUSTOMER_TRANSFER",
+  "53": "INWARDS_FOREIGN_REMITANCE",
+  "54": "CREDIT_CARD_SETTLEMENT",
+  "55": "DEVIDEND_PAYMENTS",
+  "58": "SL_CUSTOMS_PAYMENTS",
+  "62": "LPOPP",
+  "70": "MERCHANT_CR",
+};
+
+/* ----------------------------- flow catalogue ----------------------------- */
+/* Keyed by transaction code; refined by heuristics in detectFlow(). */
+const FLOWS = {
+  "52": {
+    name: "CEFT Credit Transfer",
+    desc: "A standard CEFT account-to-account credit (Customer Transfer). The originating bank pushes funds to a beneficiary account at the destination bank.",
   },
-  "002": {
-    enumName: "DESTINATION_ACCOUNT_NO",
-    prop: "destAccountNo",
-    apiField: "destinationAccount",
-    desc: "Destination (beneficiary) account number.",
+  "44": {
+    name: "CEFT Debit Transfer / JustPay PIN",
+    desc: "A customer-debit leg (CUSTOMER_TRANSFER_DR). Used for CEFT debit transfers and for the PIN-based JustPay debit leg.",
   },
-  "003": {
-    enumName: "CARDHOLDER_PAN",
-    prop: "cardholderPAN",
-    apiField: null,
-    desc: "Cardholder Primary Account Number (PAN).",
+  "42": {
+    name: "JustPay Registration",
+    desc: "Registration of a customer/account for JustPay (LankaPay JustPay). No value is moved — it links the account for future JustPay debits.",
   },
-  "004": {
-    enumName: "CARDHOLDER_ACCOUNT",
-    prop: "cardholderAccount",
-    apiField: "originatingAccount",
-    desc: "Cardholder / originating account. Often currency-prefixed, e.g. LKR<account>.",
+  "43": {
+    name: "JustPay Transaction",
+    desc: "A JustPay payment — a real-time low-value debit from a registered customer account to a biller/merchant.",
   },
-  "005": {
-    enumName: "DESTINATION_BANK_CODE",
-    prop: "destBankCode",
-    apiField: "destinationBankCode",
-    desc: "Destination bank code. Also copied to receiverIdentificationCode.",
+  "70": {
+    name: "QR Merchant Credit",
+    desc: "The merchant-credit leg of a QR payment (QR Type 1/3/4). Funds settle from a QR GL into the merchant's account.",
   },
-  "006": {
-    enumName: "ORIGINATING_BANK_CODE",
-    prop: "orgBankCode",
-    apiField: null,
-    desc: "Originating bank code (acquirer / sending bank).",
+  "45": {
+    name: "QR Customer Debit",
+    desc: "The customer-debit leg of a QR payment (QR Type 2/3/4). The payer's account is debited and funds move toward the QR settlement GL.",
   },
-  "007": {
-    enumName: "DESTINATION_BRANCH_CODE",
-    prop: "destBranchCode",
-    apiField: "destinationBranchCode",
-    desc: "Destination branch code (validated / transformed on parse).",
+  "53": {
+    name: "Inward Foreign Remittance",
+    desc: "An inward remittance credited to a local beneficiary (routed as an IB_EFT credit).",
   },
-  "008": {
-    enumName: "ORIGINATING_BRANCH_CODE",
-    prop: "orgBranchCode",
-    apiField: "originatingBranchCode",
-    desc: "Originating branch code (validated / transformed on parse).",
+  "54": {
+    name: "Credit Card Settlement",
+    desc: "A credit-card settlement movement between institutions.",
   },
-  "009": {
-    enumName: "DESTINATION_ACCOUNT_HOLDERS_NAME",
-    prop: "destAccountHolderName",
-    apiField: "destinationAccountHolderName",
-    desc: "Destination account holder's name.",
+  "62": {
+    name: "LPOPP / IRD Payment",
+    desc: "A Local Payment of Public Payments (LPOPP) / IRD government payment. The transaction code is supplied by the caller rather than a fixed value.",
   },
-  "010": {
-    enumName: "ACCOUNT_HOLDERS_NAME",
-    prop: "orgAccountHolderName",
-    apiField: "originatingAccountHolderName",
-    desc: "Originating account holder's name.",
-  },
-  "011": {
-    enumName: "PARTICULARS",
-    prop: "particulars",
-    apiField: "particulars",
-    desc: "Particulars / narrative shown to the beneficiary.",
-  },
-  "012": {
-    enumName: "REFERENCE",
-    prop: "reference",
-    apiField: "reference",
-    desc: "Customer reference for the transaction.",
-  },
-  "013": {
-    enumName: "TRANSACTION_CODE",
-    prop: "transactionCode.code",
-    apiField: null,
-    desc: "Transaction code (resolved to a TransactionCode enum on parse).",
-  },
-  "014": {
-    enumName: "TRANSACTION_ID",
-    prop: "transactionId",
-    apiField: null,
-    desc: "Transaction ID. Defined in enum; not currently built/parsed.",
-  },
-  "015": {
-    enumName: "ORIGINATOR_WALLET_NUMBER",
-    prop: "originatorWalletNumber",
-    apiField: null,
-    desc: "Originator wallet number. Defined in enum; not currently built/parsed.",
-  },
-  "016": {
-    enumName: "DESTINATION_WALLET_NUMBER",
-    prop: "destinationWalletNumber",
-    apiField: null,
-    desc: "Destination wallet number. Defined in enum; not currently built/parsed.",
-  },
-  "017": {
-    enumName: "ADDITIONAL_DATA",
-    prop: "additionalData",
-    apiField: null,
-    desc: "Additional data. Defined in enum; not currently built/parsed.",
+  "00": {
+    name: "Balance Inquiry",
+    desc: "A non-financial balance inquiry — no funds are moved.",
   },
 };
 
-/* API request body fields that do NOT land in Field 120 (shown in JSON mode). */
-const NON_TLV_API_FIELDS = {
-  amount: "ISO DE4 — Amount, transaction",
-  originatingAccountType: "ISO DE3 — Processing code (from-account type)",
-  destinationAccountType: "ISO DE3 — Processing code (to-account type)",
-  consumerTranId: "Client transaction id (audit / idempotency, not in tag 120)",
-  handleCoreBankEntries: "Core-banking posting flag (service-level, not in tag 120)",
+const GENERIC_FLOW = {
+  name: "Generic CEFT EFT Transfer",
+  desc: "A CEFT electronic fund transfer. The transaction code did not match a more specific flow, so this is treated as a standard EFT credit/debit.",
 };
 
-/* Keys that, inside a JSON body, carry a raw TLV string we should decode. */
-const TLV_STRING_KEYS = [
-  "120", "field120", "tag120", "f120",
-  "eftTlvData", "eftTlv", "tlvData", "tlv", "efttlvdata",
-];
+/* Per-field, flow-aware usage text. Falls back to a generic line per tag. */
+const USAGE = {
+  generic: {
+    "002": "Identifies the account to be <strong>credited</strong>. The issuer/destination bank posts the funds here.",
+    "004": "Identifies the account to be <strong>debited</strong> (the payer). Drives the funding leg of the transfer.",
+    "005": "Routes the message to the correct <strong>destination bank</strong> within the CEFT/LankaPay network.",
+    "006": "Identifies the <strong>originating bank</strong> for reconciliation and the return/reversal path.",
+    "007": "Pinpoints the destination <strong>branch</strong> for core-banking posting.",
+    "008": "Pinpoints the originating <strong>branch</strong> for core-banking posting.",
+    "009": "Shown as the <strong>payee name</strong> and used for beneficiary-name validation.",
+    "010": "Shown as the <strong>payer name</strong> on statements and advices.",
+    "011": "Free-text <strong>narration</strong> carried to the beneficiary's statement.",
+    "012": "Customer <strong>reference</strong> used for tracing and reconciliation.",
+    "013": "The <strong>transaction code</strong> that selects the processing path and posting rules.",
+  },
+  qr: {
+    "002": "Holds the <strong>merchant identification</strong> (the account credited on the merchant-credit leg).",
+    "004": "The <strong>QR settlement GL</strong> on the acquirer side (e.g. acquirer.qr.payable.gl) for external QR, or the payer's account on the debit leg.",
+    "005": "The <strong>merchant's bank code</strong> — where the QR funds are routed for settlement.",
+    "009": "Often <code>UNKNOWN</code> for external QR merchants, since only the merchant ID/bank is known.",
+    "010": "Frequently <code>QR-GL</code>, marking the QR general-ledger account rather than a real customer name.",
+    "011": "QR narration (e.g. <em>Transfer QR Money</em>) — a strong hint that this is a QR flow.",
+    "013": "<strong>70</strong> = merchant credit leg, <strong>45</strong> = customer debit leg of the QR payment.",
+  },
+  justpay: {
+    "002": "The biller/merchant account credited by the JustPay payment.",
+    "004": "The registered customer account debited for the JustPay payment.",
+    "013": "<strong>42</strong> = JustPay registration, <strong>43</strong> = JustPay transaction, <strong>44</strong> = PIN-based debit leg.",
+    "012": "Used to correlate the JustPay registration/transaction across the acquirer and issuer.",
+  },
+  lpopp: {
+    "013": "Carries the <strong>caller-supplied LPOPP transaction code</strong> (LPOPP overrides the default in EfvTlvBuilder).",
+    "002": "The IRD / public-payment destination account.",
+  },
+};
 
-const SAMPLE_TLV =
+const SAMPLE =
   "002012100641123718004016LKR1516300010104005004699000600467190070030020080046719009013Deepal Herath010013Deepal Herath011014Transfer Money012009reference01300245";
 
-const SAMPLE_JSON = JSON.stringify(
-  {
-    originatingAccount: "1516300010104",
-    originatingAccountHolderName: "Deepal Herath",
-    originatingAccountType: "SAVINGS",
-    originatingBranchCode: "002",
-    destinationAccount: "100641123718",
-    destinationAccountHolderName: "Deepal Herath",
-    destinationBankCode: "6990",
-    destinationBranchCode: "002",
-    amount: 1500.0,
-    particulars: "Transfer Money",
-    reference: "reference",
-    consumerTranId: "TXN-2026-0001",
-  },
-  null,
-  2
-);
-
-/* ---------------------------------------------------------------- elements */
+/* ------------------------------- elements --------------------------------- */
 const $ = (id) => document.getElementById(id);
 const input = $("input");
-const detectBadge = $("detectBadge");
 const errorMsg = $("errorMsg");
-const resultSection = $("resultSection");
-const resultTitle = $("resultTitle");
-const resultMeta = $("resultMeta");
-const resultBody = $("resultBody");
+const flowCard = $("flowCard");
+const fieldsSection = $("fieldsSection");
+const fieldsList = $("fieldsList");
 
-let lastDecoded = null; // for "Copy as JSON"
-
-/* ---------------------------------------------------------------- helpers */
+/* -------------------------------- helpers --------------------------------- */
 function esc(s) {
   return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+function showError(msg) { errorMsg.textContent = msg; errorMsg.hidden = false; }
+function hideResults() { flowCard.hidden = true; fieldsSection.hidden = true; }
 
-function showError(msg) {
-  errorMsg.textContent = msg;
-  errorMsg.hidden = false;
-}
-function clearError() {
-  errorMsg.hidden = true;
-  errorMsg.textContent = "";
-}
-
-function setBadge(el, text, cls) {
-  el.textContent = text;
-  el.className = "badge " + cls;
-}
-
-/* Decode a raw TLV string -> array of segments (mirrors breakEftTlvData). */
+/* Decode a raw TLV string into an array of segments (mirrors breakEftTlvData). */
 function decodeTlv(raw) {
-  const segments = [];
+  const out = [];
   let i = 0;
   while (i < raw.length) {
     const remaining = raw.length - i;
     if (remaining < 6) {
-      segments.push({ error: true, message: `Trailing data too short for a TLV header (need 6+ chars, got ${remaining}): "${raw.slice(i)}"` });
+      out.push({ error: `Trailing data too short for a TLV header (need 6+ chars, got ${remaining}): "${raw.slice(i)}"` });
       break;
     }
     const tagId = raw.substr(i, 3);
     const lenStr = raw.substr(i + 3, 3);
+    if (!/^\d{3}$/.test(lenStr)) {
+      out.push({ error: `Invalid length "${lenStr}" at position ${i + 3} — expected 3 digits.` });
+      break;
+    }
     const len = parseInt(lenStr, 10);
-    if (!/^\d{3}$/.test(lenStr) || Number.isNaN(len)) {
-      segments.push({ error: true, message: `Invalid length "${lenStr}" at position ${i + 3} (expected 3 digits).` });
-      break;
-    }
     if (i + 6 + len > raw.length) {
-      segments.push({ error: true, message: `Tag ${tagId} declares length ${len} but only ${raw.length - (i + 6)} chars remain.` });
+      out.push({ error: `Tag ${tagId} declares length ${len} but only ${raw.length - (i + 6)} chars remain.` });
       break;
     }
-    const value = raw.substr(i + 6, len);
-    segments.push({ tagId, len, lenStr, value, meta: TAGS[tagId] || null });
+    out.push({ tagId, len, value: raw.substr(i + 6, len), meta: TAGS[tagId] || null });
     i += 6 + len;
   }
-  return segments;
+  return out;
 }
 
-/* ---------------------------------------------------------------- render */
-function renderTlv(segments, title, metaText, metaCls) {
-  resultTitle.textContent = title;
-  setBadge(resultMeta, metaText, metaCls);
+/* Identify the business flow from the decoded values. */
+function detectFlow(segments) {
+  const byTag = {};
+  for (const s of segments) if (!s.error) byTag[s.tagId] = s.value;
 
-  const known = segments.filter((s) => !s.error && s.meta).length;
-  const unknown = segments.filter((s) => !s.error && !s.meta).length;
-  const errors = segments.filter((s) => s.error).length;
+  const txnCode = byTag["013"];
+  const particulars = (byTag["011"] || "").toLowerCase();
+  const orgName = (byTag["010"] || "");
+  const destName = (byTag["009"] || "");
+  const blob = (particulars + " " + orgName + " " + destName).toLowerCase();
 
-  let html = `<p class="summary-line">Parsed <strong>${segments.length - errors}</strong> tag(s)` +
-    ` &mdash; ${known} mapped, ${unknown} unknown` +
-    (errors ? `, <span class="unknown-tag">${errors} error(s)</span>` : "") + `.</p>`;
+  const hasQr = /qr/.test(blob) || orgName.toUpperCase() === "QR-GL";
+  const hasJp = /just\s*pay|justpay|\bjp\b/.test(blob);
+  const hasP2p = /p2p|peer[\s-]*to[\s-]*peer/.test(blob);
 
-  html += `<div class="table-wrap"><table class="data-table"><thead><tr>
-      <th>Tag</th><th>Len</th><th>Value</th>
-      <th>Field name (enum)</th><th>FinancialMessage property</th><th>Description</th>
-    </tr></thead><tbody>`;
+  const reasons = [];
+  let flow, category = "generic", confidence = "low";
 
-  for (const s of segments) {
+  if (txnCode && FLOWS[txnCode]) {
+    flow = { ...FLOWS[txnCode] };
+    confidence = "medium";
+    const label = TXN_CODES[txnCode] || "?";
+    reasons.push(`Tag <code>013</code> = <code>${esc(txnCode)}</code> (${label}) selects the processing path.`);
+
+    if (txnCode === "70" || txnCode === "45") {
+      category = "qr";
+      if (hasP2p) {
+        flow.name = "Peer-to-Peer QR Credit";
+        flow.desc = "A peer-to-peer QR transfer (PEER_TO_PEER_QR_CUSTOMER_CR). Funds move directly between two individuals via a QR payment rather than to a merchant.";
+        reasons.push("Particulars/name indicate a peer-to-peer QR transfer.");
+        confidence = "high";
+      } else if (hasQr) {
+        flow.name = txnCode === "70" ? "QR Merchant Credit" : "QR Customer Debit";
+        reasons.push(orgName.toUpperCase() === "QR-GL"
+          ? "Originating holder is <code>QR-GL</code> — the QR settlement general-ledger account."
+          : "Particulars contain a <code>QR</code> marker.");
+        if (destName.toUpperCase() === "UNKNOWN")
+          reasons.push("Destination holder is <code>UNKNOWN</code>, typical of an external QR merchant.");
+        confidence = "high";
+      } else {
+        // CUSTOMER_DR/MERCHANT_CR without a QR marker — still most likely QR, but less certain.
+        flow.name = txnCode === "70" ? "Merchant Credit (QR/EFT)" : "Customer Debit (QR/EFT)";
+        reasons.push("No explicit QR marker found — flow inferred from the transaction code alone.");
+      }
+    } else if (txnCode === "42" || txnCode === "43" || txnCode === "44") {
+      category = "justpay";
+      if (txnCode === "44" && !hasJp) {
+        // 44 is shared between CEFT debit and JustPay PIN.
+        reasons.push("Code 44 is shared by CEFT debit transfers and the JustPay PIN leg.");
+      } else if (hasJp) {
+        reasons.push("Particulars/name reference JustPay.");
+        confidence = "high";
+      } else {
+        confidence = "high";
+      }
+    } else if (txnCode === "62") {
+      category = "lpopp";
+      confidence = "high";
+    } else if (txnCode === "52" || txnCode === "53" || txnCode === "54") {
+      category = "generic";
+      confidence = "high";
+    }
+  } else {
+    flow = { ...GENERIC_FLOW };
+    if (txnCode) reasons.push(`Tag <code>013</code> = <code>${esc(txnCode)}</code> did not match a known flow code.`);
+    else reasons.push("No Tag <code>013</code> (transaction code) present — flow could not be pinned down.");
+    if (hasQr) { reasons.push("Particulars/name contain a QR marker."); category = "qr"; }
+  }
+
+  return { flow, category, confidence, reasons };
+}
+
+/* ------------------------------- rendering -------------------------------- */
+function renderFlow(detected) {
+  $("flowName").textContent = detected.flow.name;
+  $("flowDesc").textContent = detected.flow.desc;
+  const conf = $("flowConfidence");
+  conf.textContent = detected.confidence + " confidence";
+  conf.className = "confidence " + detected.confidence;
+  $("flowReasons").innerHTML = detected.reasons.map((r) => `<li>${r}</li>`).join("");
+  flowCard.hidden = false;
+}
+
+function usageFor(tagId, category) {
+  return (USAGE[category] && USAGE[category][tagId]) || USAGE.generic[tagId] || null;
+}
+
+function renderFields(segments, category) {
+  const ok = segments.filter((s) => !s.error);
+  const known = ok.filter((s) => s.meta).length;
+  const errs = segments.filter((s) => s.error).length;
+
+  $("fieldsSummary").textContent =
+    `${ok.length} tag${ok.length === 1 ? "" : "s"} · ${known} mapped` + (errs ? ` · ${errs} error` : "");
+
+  fieldsList.innerHTML = segments.map((s) => {
     if (s.error) {
-      html += `<tr class="row-error"><td colspan="6">⚠ ${esc(s.message)}</td></tr>`;
-      continue;
+      return `<div class="field-item error"><p class="field-error-msg">⚠ ${esc(s.error)}</p></div>`;
     }
-    if (s.meta) {
-      html += `<tr>
-        <td class="mono tag-id">${esc(s.tagId)}</td>
-        <td class="mono len-cell">${s.len}</td>
-        <td class="mono val-cell">${esc(s.value) || '<span class="na">(empty)</span>'}</td>
-        <td class="enum-name">${esc(s.meta.enumName)}</td>
-        <td class="prop-name">${esc(s.meta.prop)}</td>
-        <td>${esc(s.meta.desc)}</td>
-      </tr>`;
-    } else {
-      html += `<tr>
-        <td class="mono tag-id unknown-tag">${esc(s.tagId)}</td>
-        <td class="mono len-cell">${s.len}</td>
-        <td class="mono val-cell">${esc(s.value)}</td>
-        <td class="unknown-tag" colspan="3">Unknown tag — not defined in EftTlvTag.</td>
-      </tr>`;
+    const meta = s.meta;
+    const value = s.value === "" ? `<span class="empty">(empty)</span>` : esc(s.value);
+    if (!meta) {
+      return `<div class="field-item unknown">
+        <div class="tag-badge">${esc(s.tagId)}</div>
+        <div class="field-main">
+          <div class="field-top"><span class="field-name">Unknown tag</span></div>
+          <div class="field-value">${value} <span class="len">· len ${s.len}</span></div>
+          <p class="field-meaning">This tag is not defined in <code>EftTlvTag</code>.</p>
+        </div>
+      </div>`;
     }
-  }
-  html += `</tbody></table></div>`;
-  resultBody.innerHTML = html;
-  resultSection.hidden = false;
+    const usage = usageFor(s.tagId, category);
+    let valExtra = "";
+    if (s.tagId === "013") {
+      const label = TXN_CODES[s.value];
+      if (label) valExtra = ` <span class="len">· ${esc(label)}</span>`;
+    }
+    return `<div class="field-item">
+      <div class="tag-badge">${esc(s.tagId)}</div>
+      <div class="field-main">
+        <div class="field-top">
+          <span class="field-name">${esc(meta.name)}</span>
+          <span class="field-prop">${esc(meta.prop)}</span>
+        </div>
+        <div class="field-value">${value} <span class="len">· len ${s.len}</span>${valExtra}</div>
+        <p class="field-meaning">${esc(meta.meaning)}</p>
+        ${usage ? `<p class="field-usage">In this flow: ${usage}</p>` : ""}
+      </div>
+    </div>`;
+  }).join("");
 
-  lastDecoded = segments
-    .filter((s) => !s.error)
-    .map((s) => ({
-      tag: s.tagId,
-      length: s.len,
-      value: s.value,
-      fieldName: s.meta ? s.meta.enumName : "UNKNOWN",
-      property: s.meta ? s.meta.prop : null,
-    }));
+  fieldsSection.hidden = false;
 }
 
-/* Render API request body -> tag mapping (forward direction). */
-function renderRequestBody(obj) {
-  resultTitle.textContent = "API request body → tag mapping";
-  setBadge(resultMeta, "request body", "badge-json");
-
-  const rows = [];
-  const exported = [];
-  for (const [key, rawVal] of Object.entries(obj)) {
-    const value = typeof rawVal === "object" && rawVal !== null ? JSON.stringify(rawVal) : String(rawVal);
-    // Find the tag this API field maps to.
-    const tagEntry = Object.entries(TAGS).find(([, m]) => m.apiField === key);
-    if (tagEntry) {
-      const [tagId, meta] = tagEntry;
-      rows.push(`<tr>
-        <td class="mono">${esc(key)}</td>
-        <td class="mono val-cell">${esc(value)}</td>
-        <td class="mono tag-id">${esc(tagId)}</td>
-        <td class="enum-name">${esc(meta.enumName)}</td>
-        <td>${esc(meta.desc)}</td>
-      </tr>`);
-      exported.push({ apiField: key, value, tag: tagId, fieldName: meta.enumName });
-    } else if (NON_TLV_API_FIELDS[key]) {
-      rows.push(`<tr>
-        <td class="mono">${esc(key)}</td>
-        <td class="mono val-cell">${esc(value)}</td>
-        <td class="na">—</td>
-        <td class="na" colspan="2">${esc(NON_TLV_API_FIELDS[key])}</td>
-      </tr>`);
-      exported.push({ apiField: key, value, tag: null, fieldName: NON_TLV_API_FIELDS[key] });
-    } else {
-      rows.push(`<tr>
-        <td class="mono">${esc(key)}</td>
-        <td class="mono val-cell">${esc(value)}</td>
-        <td class="na">—</td>
-        <td class="unknown-tag" colspan="2">Not a recognised CEFT field.</td>
-      </tr>`);
-      exported.push({ apiField: key, value, tag: null, fieldName: "UNRECOGNISED" });
-    }
-  }
-
-  const mappedCount = exported.filter((e) => e.tag).length;
-  let html = `<p class="summary-line"><strong>${mappedCount}</strong> field(s) map to Field 120 tags; ` +
-    `the rest are carried in other ISO fields or at the service layer.</p>`;
-  html += `<div class="table-wrap"><table class="data-table"><thead><tr>
-      <th>API field</th><th>Value</th><th>Tag</th><th>Field name (enum)</th><th>Notes</th>
-    </tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
-  resultBody.innerHTML = html;
-  resultSection.hidden = false;
-  lastDecoded = exported;
-}
-
-/* ---------------------------------------------------------------- main */
+/* --------------------------------- main ----------------------------------- */
 function run() {
-  clearError();
+  errorMsg.hidden = true;
   const raw = input.value.trim();
   if (!raw) {
-    showError("Please paste a tag 120 TLV string or an API request body first.");
-    resultSection.hidden = true;
-    setBadge(detectBadge, "awaiting input", "badge-muted");
+    hideResults();
+    showError("Paste a Tag 120 / Field 120 TLV string to decode.");
     return;
   }
-
-  // JSON?
   if (raw.startsWith("{") || raw.startsWith("[")) {
-    let obj;
-    try {
-      obj = JSON.parse(raw);
-    } catch (e) {
-      showError("Looks like JSON but failed to parse: " + e.message);
-      return;
-    }
-    if (Array.isArray(obj)) obj = obj[0] || {};
-
-    // Does the JSON embed a raw TLV string under a known key?
-    const tlvKey = Object.keys(obj).find((k) =>
-      TLV_STRING_KEYS.includes(k.toLowerCase())
-    );
-    if (tlvKey && typeof obj[tlvKey] === "string") {
-      setBadge(detectBadge, `JSON → TLV in "${tlvKey}"`, "badge-json");
-      renderTlv(decodeTlv(obj[tlvKey].trim()), `Decoded "${tlvKey}"`, "embedded TLV", "badge-tlv");
-      return;
-    }
-
-    setBadge(detectBadge, "API request body", "badge-json");
-    renderRequestBody(obj);
+    hideResults();
+    showError("This tool only decodes a raw Tag 120 / Field 120 TLV string — not JSON / API bodies.");
+    return;
+  }
+  if (!/^\d{3}/.test(raw)) {
+    hideResults();
+    showError("That does not look like a TLV string — it should start with a 3-digit tag (e.g. 002…).");
     return;
   }
 
-  // Raw TLV string. Strip an optional leading 3-digit LLLVAR length prefix only
-  // if it makes the rest parse cleanly is risky, so we decode as-is.
-  setBadge(detectBadge, "tag 120 TLV string", "badge-tlv");
   const segments = decodeTlv(raw);
-  const hasError = segments.some((s) => s.error);
-  renderTlv(
-    segments,
-    "Decoded tag 120 TLV",
-    hasError ? "parsed with warnings" : "valid",
-    hasError ? "badge-warn" : "badge-tlv"
-  );
+  const detected = detectFlow(segments);
+  renderFlow(detected);
+  renderFields(segments, detected.category);
+  flowCard.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-/* ---------------------------------------------------------------- dictionary table */
-function buildDictTable() {
-  const tbody = document.querySelector("#dictTable tbody");
-  tbody.innerHTML = Object.entries(TAGS)
-    .map(
-      ([tagId, m]) => `<tr>
-        <td class="mono tag-id">${tagId}</td>
-        <td class="enum-name">${m.enumName}</td>
-        <td class="prop-name">${m.prop}</td>
-        <td class="mono">${m.apiField ? esc(m.apiField) : '<span class="na">—</span>'}</td>
-        <td>${esc(m.desc)}</td>
-      </tr>`
-    )
-    .join("");
-}
-
-/* ---------------------------------------------------------------- events */
+/* -------------------------------- events ---------------------------------- */
 $("decodeBtn").addEventListener("click", run);
-$("sampleTlvBtn").addEventListener("click", () => {
-  input.value = SAMPLE_TLV;
-  run();
-});
-$("sampleJsonBtn").addEventListener("click", () => {
-  input.value = SAMPLE_JSON;
-  run();
-});
+$("sampleBtn").addEventListener("click", () => { input.value = SAMPLE; run(); });
 $("clearBtn").addEventListener("click", () => {
-  input.value = "";
-  clearError();
-  resultSection.hidden = true;
-  setBadge(detectBadge, "awaiting input", "badge-muted");
-  input.focus();
-});
-$("copyJsonBtn").addEventListener("click", async () => {
-  if (!lastDecoded) return;
-  try {
-    await navigator.clipboard.writeText(JSON.stringify(lastDecoded, null, 2));
-    const btn = $("copyJsonBtn");
-    const old = btn.textContent;
-    btn.textContent = "Copied ✓";
-    setTimeout(() => (btn.textContent = old), 1200);
-  } catch {
-    showError("Clipboard not available in this context.");
-  }
+  input.value = ""; errorMsg.hidden = true; hideResults(); input.focus();
 });
 input.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") run();
 });
-
-buildDictTable();
