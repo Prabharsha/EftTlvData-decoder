@@ -14,40 +14,44 @@
  * ========================================================================== */
 
 /* ----------------------------- tag dictionary ----------------------------- */
+/* `side` colour-codes each tag by the leg it belongs to:
+ *   "debit"   → originating / payer side (money OUT)
+ *   "credit"  → destination / beneficiary side (money IN)
+ *   "neutral" → shared metadata (narration, reference, codes) */
 const TAGS = {
-  "001": { name: "BENEFICIARY_CARD_NO", prop: "beneficiaryCardNo",
+  "001": { name: "BENEFICIARY_CARD_NO", prop: "beneficiaryCardNo", side: "credit",
     meaning: "Beneficiary card number used in card-based credit transactions." },
-  "002": { name: "DESTINATION_ACCOUNT_NO", prop: "destAccountNo",
+  "002": { name: "DESTINATION_ACCOUNT_NO", prop: "destAccountNo", side: "credit",
     meaning: "The destination (beneficiary / credited) account number." },
-  "003": { name: "CARDHOLDER_PAN", prop: "cardholderPAN",
+  "003": { name: "CARDHOLDER_PAN", prop: "cardholderPAN", side: "debit",
     meaning: "Cardholder Primary Account Number (PAN)." },
-  "004": { name: "CARDHOLDER_ACCOUNT", prop: "cardholderAccount",
+  "004": { name: "CARDHOLDER_ACCOUNT", prop: "cardholderAccount", side: "debit",
     meaning: "The originating (debited) account. Often currency-prefixed, e.g. LKR<account>." },
-  "005": { name: "DESTINATION_BANK_CODE", prop: "destBankCode",
+  "005": { name: "DESTINATION_BANK_CODE", prop: "destBankCode", side: "credit",
     meaning: "Bank code of the destination institution (also copied to receiverIdentificationCode)." },
-  "006": { name: "ORIGINATING_BANK_CODE", prop: "orgBankCode",
+  "006": { name: "ORIGINATING_BANK_CODE", prop: "orgBankCode", side: "debit",
     meaning: "Bank code of the originating (sending / acquiring) institution." },
-  "007": { name: "DESTINATION_BRANCH_CODE", prop: "destBranchCode",
+  "007": { name: "DESTINATION_BRANCH_CODE", prop: "destBranchCode", side: "credit",
     meaning: "Branch code of the destination account (validated/transformed on parse)." },
-  "008": { name: "ORIGINATING_BRANCH_CODE", prop: "orgBranchCode",
+  "008": { name: "ORIGINATING_BRANCH_CODE", prop: "orgBranchCode", side: "debit",
     meaning: "Branch code of the originating account (validated/transformed on parse)." },
-  "009": { name: "DESTINATION_ACCOUNT_HOLDERS_NAME", prop: "destAccountHolderName",
+  "009": { name: "DESTINATION_ACCOUNT_HOLDERS_NAME", prop: "destAccountHolderName", side: "credit",
     meaning: "Name of the destination account holder (the payee)." },
-  "010": { name: "ACCOUNT_HOLDERS_NAME", prop: "orgAccountHolderName",
+  "010": { name: "ACCOUNT_HOLDERS_NAME", prop: "orgAccountHolderName", side: "debit",
     meaning: "Name of the originating account holder (the payer)." },
-  "011": { name: "PARTICULARS", prop: "particulars",
+  "011": { name: "PARTICULARS", prop: "particulars", side: "neutral",
     meaning: "Narrative / particulars shown to the beneficiary." },
-  "012": { name: "REFERENCE", prop: "reference",
+  "012": { name: "REFERENCE", prop: "reference", side: "neutral",
     meaning: "Customer / transaction reference." },
-  "013": { name: "TRANSACTION_CODE", prop: "transactionCode.code",
+  "013": { name: "TRANSACTION_CODE", prop: "transactionCode.code", side: "neutral",
     meaning: "Transaction code — the primary signal for the business flow." },
-  "014": { name: "TRANSACTION_ID", prop: "transactionId",
+  "014": { name: "TRANSACTION_ID", prop: "transactionId", side: "neutral",
     meaning: "Transaction ID (defined in EftTlvTag; not currently built/parsed in core)." },
-  "015": { name: "ORIGINATOR_WALLET_NUMBER", prop: "originatorWalletNumber",
+  "015": { name: "ORIGINATOR_WALLET_NUMBER", prop: "originatorWalletNumber", side: "debit",
     meaning: "Originator wallet number (defined in EftTlvTag; not currently built/parsed)." },
-  "016": { name: "DESTINATION_WALLET_NUMBER", prop: "destinationWalletNumber",
+  "016": { name: "DESTINATION_WALLET_NUMBER", prop: "destinationWalletNumber", side: "credit",
     meaning: "Destination wallet number (defined in EftTlvTag; not currently built/parsed)." },
-  "017": { name: "ADDITIONAL_DATA", prop: "additionalData",
+  "017": { name: "ADDITIONAL_DATA", prop: "additionalData", side: "neutral",
     meaning: "Additional data (defined in EftTlvTag; not currently built/parsed)." },
 };
 
@@ -329,7 +333,8 @@ function renderFields(segments, category) {
       const label = TXN_CODES[s.value];
       if (label) valExtra = ` <span class="len">· ${esc(label)}</span>`;
     }
-    return `<div class="field-item">
+    const sideClass = `is-${meta.side || "neutral"}`;
+    return `<div class="field-item ${sideClass}">
       <div class="tag-badge">${esc(s.tagId)}</div>
       <div class="field-main">
         <div class="field-top">
@@ -372,6 +377,26 @@ function run() {
   renderFields(segments, detected.category);
   flowCard.scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
+/* --------------------------------- theme ---------------------------------- */
+const themeToggle = $("themeToggle");
+const themeIcon = themeToggle.querySelector(".theme-icon");
+
+function syncThemeButton() {
+  const dark = document.documentElement.getAttribute("data-theme") === "dark";
+  themeIcon.textContent = dark ? "☀️" : "🌙";
+  const label = dark ? "Switch to light mode" : "Switch to dark mode";
+  themeToggle.setAttribute("aria-label", label);
+  themeToggle.setAttribute("title", label);
+}
+syncThemeButton();
+
+themeToggle.addEventListener("click", () => {
+  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem("theme", next); } catch (e) {}
+  syncThemeButton();
+});
 
 /* -------------------------------- events ---------------------------------- */
 $("decodeBtn").addEventListener("click", run);
