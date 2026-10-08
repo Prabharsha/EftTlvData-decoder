@@ -37,7 +37,7 @@
 
   <header class="hero">
     <span class="eyebrow">CEFT · Field 120</span>
-    <h1>Read a <span class="hl">Tag 120</span> string<br />like plain English.</h1>
+    <h1>Read a <span class="hl">Tag 120</span> string <br />like plain English.</h1>
     <p class="hero-sub">
       Paste a raw Tag&nbsp;120 / Field&nbsp;120 TLV string. We break it into its
       tags, tell you what each value means, and identify the business flow it
@@ -46,14 +46,18 @@
   </header>
 
   <main class="container">
+    <div class="left-col">
     <!-- Input card -->
     <section class="card input-card">
       <div class="card-row">
         <label for="input" class="field-label">Tag 120 / Field 120 string</label>
         <button id="sampleBtn" class="link-btn" type="button">Try a sample</button>
       </div>
+      <div class="editor">
+      <div id="backdrop" class="backdrop" aria-hidden="true"></div>
       <textarea id="input" spellcheck="false"
         placeholder="e.g. 002012100641123718004016LKR1516300010104005004699000600467190070030020080046719009013Deepal Herath010013Deepal Herath011014Transfer Money012009reference01300245"></textarea>
+      </div>
       <div class="input-actions">
         <button id="decodeBtn" class="btn-primary" type="button">Decode TLV →</button>
         <button id="clearBtn" class="btn-ghost" type="button">Clear</button>
@@ -76,8 +80,11 @@
       </div>
     </section>
 
+    </div>
+
     <!-- Decoded fields -->
     <section id="fieldsSection" class="fields-section" hidden>
+      <div class="fields-sticky">
       <div class="section-head">
         <h2 class="section-title">Decoded fields</h2>
         <span id="fieldsSummary" class="summary-chip"></span>
@@ -92,6 +99,7 @@
         <span class="legend-item is-neutral">
           <span class="legend-dot"></span>Shared · metadata
         </span>
+      </div>
       </div>
       <div id="fieldsList" class="fields-list"></div>
     </section>
