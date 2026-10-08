@@ -192,12 +192,10 @@ function esc(s) {
   return String(s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
-/* Golden-angle hues with 3 alternating lightness levels: distinct, and light
- * enough for dark text. */
-function colorFor(i) {
-  const h = Math.round((i * 137.508) % 360);
-  const l = [80, 87, 74][i % 3];
-  return `hsl(${h} 70% ${l}%)`;
+/* Golden-angle hue per field; saturation/lightness come from the theme in CSS
+ * (--field-s / --field-l) so the tint stays soft and readable in both themes. */
+function hueFor(i) {
+  return Math.round((i * 137.508) % 360);
 }
 function showError(msg) { errorMsg.textContent = msg; errorMsg.hidden = false; }
 function hideResults() { flowCard.hidden = true; fieldsSection.hidden = true; renderHighlightSafe(); }
@@ -332,7 +330,7 @@ function renderFields(segments, category) {
     }
     const meta = s.meta;
     const value = `<input class="field-edit" type="text" data-idx="${idx}" value="${esc(s.value)}" maxlength="${s.len}" spellcheck="false" autocomplete="off" aria-label="Value of tag ${esc(s.tagId)}"${s.len === 0 ? " disabled" : ""}>`;
-    const colorAttr = `data-idx="${idx}" style="--c:${colorFor(idx)}"`;
+    const colorAttr = `data-idx="${idx}" style="--h:${hueFor(idx)}"`;
     if (!meta) {
       return `<div class="field-item unknown colored" ${colorAttr}>
         <div class="tag-badge">${esc(s.tagId)}</div>
@@ -413,8 +411,10 @@ function renderHighlight() {
   }
   let html = "", pos = 0;
   for (const sp of spans) {
-    html += esc(v.slice(pos, sp.a));
-    html += `<mark data-idx="${sp.idx}" style="background:${colorFor(sp.idx)}">${esc(v.slice(sp.a, sp.b))}</mark>`;
+    const h = Math.max(pos, sp.a - 6);  // 3-char tag + 3-char length header
+    html += esc(v.slice(pos, h));
+    html += `<span class="hdr">${esc(v.slice(h, sp.a))}</span>`;
+    html += `<mark data-idx="${sp.idx}" style="--h:${hueFor(sp.idx)}">${esc(v.slice(sp.a, sp.b))}</mark>`;
     pos = sp.b;
   }
   html += esc(v.slice(pos));
@@ -428,6 +428,7 @@ function syncScroll() {
 
 function setActive(idx) {
   document.querySelectorAll(".is-active").forEach((el) => el.classList.remove("is-active"));
+  backdrop.classList.toggle("has-active", idx != null);
   if (idx == null) return;
   document.querySelectorAll(`[data-idx="${idx}"]`).forEach((el) => {
     if (el.tagName !== "INPUT") el.classList.add("is-active");
