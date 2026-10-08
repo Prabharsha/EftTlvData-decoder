@@ -180,14 +180,28 @@ const errorMsg = $("errorMsg");
 const flowCard = $("flowCard");
 const fieldsSection = $("fieldsSection");
 const fieldsList = $("fieldsList");
+const backdrop = $("backdrop");
+
+/* Offsets from decodeTlv() are relative to the trimmed string; `lead` maps them
+ * back onto the raw textarea value. */
+let currentSegments = [];
+let lead = 0;
 
 /* -------------------------------- helpers --------------------------------- */
 function esc(s) {
   return String(s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+/* Golden-angle hues with 3 alternating lightness levels: distinct, and light
+ * enough for dark text. */
+function colorFor(i) {
+  const h = Math.round((i * 137.508) % 360);
+  const l = [80, 87, 74][i % 3];
+  return `hsl(${h} 70% ${l}%)`;
+}
 function showError(msg) { errorMsg.textContent = msg; errorMsg.hidden = false; }
-function hideResults() { flowCard.hidden = true; fieldsSection.hidden = true; }
+function hideResults() { flowCard.hidden = true; fieldsSection.hidden = true; renderHighlightSafe(); }
+function renderHighlightSafe() { if (typeof renderHighlight === "function") renderHighlight(); }
 
 /* Decode a raw TLV string into an array of segments (mirrors breakEftTlvData). */
 function decodeTlv(raw) {
@@ -210,7 +224,7 @@ function decodeTlv(raw) {
       out.push({ error: `Tag ${tagId} declares length ${len} but only ${raw.length - (i + 6)} chars remain.` });
       break;
     }
-    out.push({ tagId, len, value: raw.substr(i + 6, len), meta: TAGS[tagId] || null });
+    out.push({ tagId, len, value: raw.substr(i + 6, len), meta: TAGS[tagId] || null, start: i + 6, end: i + 6 + len });
     i += 6 + len;
   }
   return out;
@@ -304,6 +318,7 @@ function usageFor(tagId, category) {
 }
 
 function renderFields(segments, category) {
+  currentSegments = segments;
   const ok = segments.filter((s) => !s.error);
   const known = ok.filter((s) => s.meta).length;
   const errs = segments.filter((s) => s.error).length;
@@ -311,18 +326,19 @@ function renderFields(segments, category) {
   $("fieldsSummary").textContent =
     `${ok.length} tag${ok.length === 1 ? "" : "s"} · ${known} mapped` + (errs ? ` · ${errs} error` : "");
 
-  fieldsList.innerHTML = segments.map((s) => {
+  fieldsList.innerHTML = segments.map((s, idx) => {
     if (s.error) {
       return `<div class="field-item error"><p class="field-error-msg">⚠ ${esc(s.error)}</p></div>`;
     }
     const meta = s.meta;
-    const value = s.value === "" ? `<span class="empty">(empty)</span>` : esc(s.value);
+    const value = `<input class="field-edit" type="text" data-idx="${idx}" value="${esc(s.value)}" maxlength="${s.len}" spellcheck="false" autocomplete="off" aria-label="Value of tag ${esc(s.tagId)}"${s.len === 0 ? " disabled" : ""}>`;
+    const colorAttr = `data-idx="${idx}" style="--c:${colorFor(idx)}"`;
     if (!meta) {
-      return `<div class="field-item unknown">
+      return `<div class="field-item unknown colored" ${colorAttr}>
         <div class="tag-badge">${esc(s.tagId)}</div>
         <div class="field-main">
           <div class="field-top"><span class="field-name">Unknown tag</span></div>
-          <div class="field-value">${value} <span class="len">· len ${s.len}</span></div>
+          <div class="field-value">${value}<span class="len">· len ${s.len}</span></div>
           <p class="field-meaning">This tag is not defined in <code>EftTlvTag</code>.</p>
         </div>
       </div>`;
@@ -334,14 +350,14 @@ function renderFields(segments, category) {
       if (label) valExtra = ` <span class="len">· ${esc(label)}</span>`;
     }
     const sideClass = `is-${meta.side || "neutral"}`;
-    return `<div class="field-item ${sideClass}">
+    return `<div class="field-item colored ${sideClass}" ${colorAttr}>
       <div class="tag-badge">${esc(s.tagId)}</div>
       <div class="field-main">
         <div class="field-top">
           <span class="field-name">${esc(meta.name)}</span>
           <span class="field-prop">${esc(meta.prop)}</span>
         </div>
-        <div class="field-value">${value} <span class="len">· len ${s.len}</span>${valExtra}</div>
+        <div class="field-value">${value}<span class="len">· len ${s.len}</span>${valExtra}</div>
         <p class="field-meaning">${esc(meta.meaning)}</p>
         ${usage ? `<p class="field-usage">In this flow: ${usage}</p>` : ""}
       </div>
@@ -352,7 +368,7 @@ function renderFields(segments, category) {
 }
 
 /* --------------------------------- main ----------------------------------- */
-function run() {
+function run(scroll = true) {
   errorMsg.hidden = true;
   const raw = input.value.trim();
   if (!raw) {
@@ -371,12 +387,98 @@ function run() {
     return;
   }
 
+  decodeAndRender(raw);
+  if (scroll) flowCard.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function decodeAndRender(raw) {
+  lead = input.value.length - input.value.trimStart().length;
   const segments = decodeTlv(raw);
   const detected = detectFlow(segments);
   renderFlow(detected);
   renderFields(segments, detected.category);
-  flowCard.scrollIntoView({ behavior: "smooth", block: "start" });
+  renderHighlight();
 }
+
+/* ------------------------- highlight layer + editing ----------------------- */
+/* Paints the string behind the (transparent-text) textarea; decoded values are
+ * wrapped in coloured spans. */
+function renderHighlight() {
+  const v = input.value;
+  const spans = [];
+  if (!fieldsSection.hidden) {
+    currentSegments.forEach((s, idx) => {
+      if (!s.error && s.len > 0) spans.push({ idx, a: lead + s.start, b: lead + s.end });
+    });
+  }
+  let html = "", pos = 0;
+  for (const sp of spans) {
+    html += esc(v.slice(pos, sp.a));
+    html += `<mark data-idx="${sp.idx}" style="background:${colorFor(sp.idx)}">${esc(v.slice(sp.a, sp.b))}</mark>`;
+    pos = sp.b;
+  }
+  html += esc(v.slice(pos));
+  backdrop.innerHTML = html + "\n";
+  syncScroll();
+}
+function syncScroll() {
+  backdrop.scrollTop = input.scrollTop;
+  backdrop.scrollLeft = input.scrollLeft;
+}
+
+function setActive(idx) {
+  document.querySelectorAll(".is-active").forEach((el) => el.classList.remove("is-active"));
+  if (idx == null) return;
+  document.querySelectorAll(`[data-idx="${idx}"]`).forEach((el) => {
+    if (el.tagName !== "INPUT") el.classList.add("is-active");
+  });
+}
+
+fieldsList.addEventListener("input", (e) => {
+  const el = e.target;
+  if (!el.classList.contains("field-edit")) return;
+  const idx = Number(el.dataset.idx);
+  const seg = currentSegments[idx];
+  if (!seg || seg.error) return;
+  const caret = el.selectionStart;
+  /* Fixed length: keep exactly seg.len characters (pad with spaces / truncate). */
+  const nv = el.value.slice(0, seg.len).padEnd(seg.len, " ");
+  const a = lead + seg.start;
+  input.value = input.value.slice(0, a) + nv + input.value.slice(a + seg.len);
+  const raw = input.value.trim();
+  decodeAndRender(raw);
+  const again = fieldsList.querySelector(`.field-edit[data-idx="${idx}"]`);
+  if (again) { again.focus(); again.setSelectionRange(caret, caret); }
+  setActive(idx);
+});
+
+fieldsList.addEventListener("mouseover", (e) => {
+  const card = e.target.closest(".field-item[data-idx]");
+  setActive(card ? card.dataset.idx : null);
+});
+fieldsList.addEventListener("mouseleave", () => setActive(null));
+
+/* Reverse hover: look through the textarea at the mark underneath. */
+input.addEventListener("mousemove", (e) => {
+  input.style.pointerEvents = "none";
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  input.style.pointerEvents = "";
+  const mark = el && el.closest ? el.closest("mark[data-idx]") : null;
+  setActive(mark ? mark.dataset.idx : null);
+  if (mark) {
+    const card = fieldsList.querySelector(`.field-item[data-idx="${mark.dataset.idx}"]`);
+    if (card) card.scrollIntoView({ block: "nearest" });
+  }
+});
+input.addEventListener("mouseleave", () => setActive(null));
+input.addEventListener("scroll", syncScroll);
+
+/* Keep the highlight aligned while typing/pasting directly in the textarea. */
+input.addEventListener("input", () => {
+  const raw = input.value.trim();
+  if (!raw) { hideResults(); errorMsg.hidden = true; renderHighlight(); return; }
+  run(false);
+});
 
 /* --------------------------------- theme ---------------------------------- */
 const themeToggle = $("themeToggle");
@@ -399,7 +501,7 @@ themeToggle.addEventListener("click", () => {
 });
 
 /* -------------------------------- events ---------------------------------- */
-$("decodeBtn").addEventListener("click", run);
+$("decodeBtn").addEventListener("click", () => run());
 $("sampleBtn").addEventListener("click", () => { input.value = SAMPLE; run(); });
 $("clearBtn").addEventListener("click", () => {
   input.value = ""; errorMsg.hidden = true; hideResults(); input.focus();

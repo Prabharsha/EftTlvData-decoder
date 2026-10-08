@@ -46,14 +46,18 @@
   </header>
 
   <main class="container">
+    <div class="left-col">
     <!-- Input card -->
     <section class="card input-card">
       <div class="card-row">
         <label for="input" class="field-label">Tag 120 / Field 120 string</label>
         <button id="sampleBtn" class="link-btn" type="button">Try a sample</button>
       </div>
+      <div class="editor">
+      <div id="backdrop" class="backdrop" aria-hidden="true"></div>
       <textarea id="input" spellcheck="false"
         placeholder="e.g. 002012100641123718004016LKR1516300010104005004699000600467190070030020080046719009013Deepal Herath010013Deepal Herath011014Transfer Money012009reference01300245"></textarea>
+      </div>
       <div class="input-actions">
         <button id="decodeBtn" class="btn-primary" type="button">Decode TLV →</button>
         <button id="clearBtn" class="btn-ghost" type="button">Clear</button>
@@ -75,6 +79,8 @@
         <ul id="flowReasons"></ul>
       </div>
     </section>
+
+    </div>
 
     <!-- Decoded fields -->
     <section id="fieldsSection" class="fields-section" hidden>
