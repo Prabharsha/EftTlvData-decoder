@@ -329,7 +329,7 @@ function renderFields(segments, category) {
       return `<div class="field-item error"><p class="field-error-msg">⚠ ${esc(s.error)}</p></div>`;
     }
     const meta = s.meta;
-    const value = `<input class="field-edit" type="text" data-idx="${idx}" value="${esc(s.value)}" maxlength="${s.len}" spellcheck="false" autocomplete="off" aria-label="Value of tag ${esc(s.tagId)}"${s.len === 0 ? " disabled" : ""}>`;
+    const value = `<input class="field-edit" type="text" data-idx="${idx}" value="${esc(s.value)}" title="Fixed length (${s.len}) — typing overwrites" spellcheck="false" autocomplete="off" aria-label="Value of tag ${esc(s.tagId)}"${s.len === 0 ? " disabled" : ""}>`;
     const colorAttr = `data-idx="${idx}" style="--h:${hueFor(idx)}"`;
     if (!meta) {
       return `<div class="field-item unknown colored" ${colorAttr}>
@@ -441,13 +441,18 @@ fieldsList.addEventListener("input", (e) => {
   const idx = Number(el.dataset.idx);
   const seg = currentSegments[idx];
   if (!seg || seg.error) return;
-  const caret = el.selectionStart;
-  /* Fixed length: keep exactly seg.len characters (pad with spaces / truncate). */
-  const nv = el.value.slice(0, seg.len).padEnd(seg.len, " ");
+  /* Fixed length, overwrite mode: extra typed chars replace the ones after the
+   * caret; deletions pad the end with spaces. Length prefixes never change. */
+  let v = el.value, caret = el.selectionStart;
+  const extra = v.length - seg.len;
+  if (extra > 0) v = v.slice(0, caret) + v.slice(caret + extra);
+  caret = Math.min(caret, seg.len);
+  const nv = v.slice(0, seg.len).padEnd(seg.len, " ");
   const a = lead + seg.start;
   input.value = input.value.slice(0, a) + nv + input.value.slice(a + seg.len);
-  const raw = input.value.trim();
-  decodeAndRender(raw);
+  /* Only trim the start here: padding on the last field is trailing whitespace
+   * that a full trim() would strip, breaking that field's declared length. */
+  decodeAndRender(input.value.trimStart());
   const again = fieldsList.querySelector(`.field-edit[data-idx="${idx}"]`);
   if (again) { again.focus(); again.setSelectionRange(caret, caret); }
   setActive(idx);
